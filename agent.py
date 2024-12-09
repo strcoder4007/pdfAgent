@@ -2,19 +2,38 @@ import os
 from dotenv import load_dotenv
 import streamlit as st
 from langchain_ollama import OllamaLLM
-from pinecone.grpc import PineconeGRPC as Pinecone
-from pinecone import ServerlessSpec
 import fitz
 import numpy as np
 import json
+from sentence_transformers import SentenceTransformer
+import faiss
+import pickle
+import torch
 
+# Load environment variables
 load_dotenv()
-
-pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
-index = pc.Index("first")
 
 # Initialize LLM
 llm = OllamaLLM(model="llama3.1:latest", base_url="http://localhost:11434")
+
+# Load the E5 model for embeddings on CPU
+model_name = 'intfloat/e5-large-v2'
+device = 'cpu'  # Force using CPU
+model = SentenceTransformer(model_name, device=device)
+
+# Initialize FAISS index and chunks list
+dim = model.get_sentence_embedding_dimension()
+faiss_index = faiss.IndexHNSWFlat(dim, 32)
+chunks_list = []
+
+# Load existing index and chunks if available
+index_exists = os.path.exists('faiss_index.bin')
+chunks_exists = os.path.exists('chunks.pkl')
+
+if index_exists and chunks_exists:
+    faiss_index = faiss.read_index('faiss_index.bin')
+    with open('chunks.pkl', 'rb') as f:
+        chunks_list = pickle.load(f)
 
 # Streamlit app title
 st.title("PDF Question Answering")
@@ -38,87 +57,60 @@ def chunk_text(text, max_length=500):
         else:
             current_chunk.append(word)
     
-    # Add the last chunk
     if current_chunk:
         chunks.append(' '.join(current_chunk))
     return chunks
 
+def generate_embeddings(texts):
+    embeddings = model.encode(texts, convert_to_tensor=True)
+    return embeddings.numpy().astype(np.float32)
 
+def upsert_to_faiss(chunks, embeddings):
+    global faiss_index, chunks_list
+    num_vectors = len(chunks)
+    if faiss_index.ntotal == 0:
+        faiss_index = faiss.IndexHNSWFlat(dim, 32)
+    faiss_index.add(embeddings)
+    chunks_list.extend(chunks)
+    # Save the index and chunks
+    faiss.write_index(faiss_index, 'faiss_index.bin')
+    with open('chunks.pkl', 'wb') as f:
+        pickle.dump(chunks_list, f)
 
-def generate_embeddings(texts, model_name="multilingual-e5-large"):
-    embeddings = pc.inference.embed(
-        model=model_name,
-        inputs=texts,
-        parameters={"input_type": "passage", "truncate": "END"}
-    )
-    return [e['values'] for e in embeddings]
-
-
-
-
-def upsert_to_pinecone(chunks, embeddings):
-    """Upsert chunks and embeddings to Pinecone."""
-    records = [
-        {
-            "id": f"doc_{i}",
-            "values": embedding,
-            "metadata": {"text": chunk}
-        }
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings))
-    ]
-    index.upsert(vectors=records, namespace="default")
-
-
-
-def query_pinecone(question, top_k=3, model_name="multilingual-e5-large"):
-    """Query Pinecone for top K chunks similar to the question."""
-    query_embedding = pc.inference.embed(
-        model=model_name,
-        inputs=[question],
-        parameters={"input_type": "query"}
-    )[0]['values']
-    
-    results = index.query(
-        namespace="default",
-        vector=query_embedding,
-        top_k=top_k,
-        include_values=False,
-        include_metadata=True
-    )
-    return [match.metadata['text'] for match in results.matches]
-
-
+def query_faiss(question, top_k=3):
+    query_embedding = model.encode([question], convert_to_tensor=True).numpy().astype(np.float32)
+    D, I = faiss_index.search(query_embedding, top_k)
+    context = [chunks_list[i] for i in I[0]]
+    return context, D[0]
 
 def get_answer(question, context, llm):
     system = "Give your answers in 1-2 sentences."
     prompt = f"System: {system}\nContext: {context}\nQuestion: {question}\nAnswer:"
-    response = llm(prompt)
+    response = llm.invoke(prompt)
     return response.strip()
-
-
-
 
 def main():
     # File uploader in Streamlit
     uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
     
     if uploaded_file is not None:
-        # Save the uploaded file temporarily
-        with open("temp.pdf", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        
-        # Extract text from the PDF
-        text = extract_text_from_pdf("temp.pdf")
-        
-        # Chunk the text
-        chunks = chunk_text(text)
-        
-        # Generate embeddings for chunks
-        embeddings = generate_embeddings(chunks)
-        
-        # Upsert to Pinecone
-        upsert_to_pinecone(chunks, embeddings)
-        st.write("File embeddings saved!")
+        with st.spinner("Processing PDF..."):
+            # Save the uploaded file temporarily
+            with open("temp.pdf", "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Extract text from the PDF
+            text = extract_text_from_pdf("temp.pdf")
+            
+            # Chunk the text
+            chunks = chunk_text(text)
+            
+            # Generate embeddings for chunks
+            embeddings = generate_embeddings(chunks)
+            
+            # Upsert to FAISS
+            upsert_to_faiss(chunks, embeddings)
+            st.write("File embeddings saved!")
     
     # Text area for questions
     questions_input = st.text_area("Enter your questions (one per line):")
@@ -129,37 +121,37 @@ def main():
             st.warning("Please enter at least one question.")
             return
         
-        if "temp.pdf" not in os.listdir():
-            st.warning("Please upload a PDF file first.")
+        if faiss_index.ntotal == 0:
+            st.warning("Please upload a PDF file and build the index first.")
             return
         
-        answers = {}
-        for q in questions:
-            # Retrieve relevant context
-            context = query_pinecone(q)
-            context_str = ' '.join(context)
+        with st.spinner("Generating answers..."):
+            answers = {}
+            for q in questions:
+                # Retrieve relevant context
+                context, distances = query_faiss(q)
+                context_str = ' '.join(context)
+                
+                # Confidence threshold (placeholder value)
+                confidence_threshold = 1.5  # Adjust as needed
+                if np.min(distances) > confidence_threshold:
+                    answers[q] = "Data Not Available"
+                else:
+                    # Get answer from LLM
+                    answer = get_answer(q, context_str, llm)
+                    answers[q] = answer
             
-            # Get answer from LLM
-            answer = get_answer(q, context_str, llm)
+            # Display answers as JSON
+            st.json(answers)
             
-            # Placeholder for confidence check
-            # For demonstration, assume "Data Not Available" if context is empty
-            if not context_str:
-                answers[q] = "Data Not Available"
-            else:
-                answers[q] = answer
-        
-        # Display answers as JSON
-        st.json(answers)
-        
-        # Allow user to download the JSON
-        json_str = json.dumps(answers, indent=4)
-        st.download_button(
-            label="Download Answers as JSON",
-            data=json_str,
-            file_name="answers.json",
-            mime="application/json"
-        )
+            # Allow user to download the JSON
+            json_str = json.dumps(answers, indent=4)
+            st.download_button(
+                label="Download Answers as JSON",
+                data=json_str,
+                file_name="answers.json",
+                mime="application/json"
+            )
 
 if __name__ == "__main__":
     main()

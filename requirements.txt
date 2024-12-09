@@ -1,5 +1,5 @@
 fitz
 langchain
 streamlit
-pinecone[grpc]
-protobuf
+faiss-cpu
+sentence-transformers

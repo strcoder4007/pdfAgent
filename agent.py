@@ -18,7 +18,7 @@ llm = OllamaLLM(model="llama3.1:latest", base_url="http://localhost:11434")
 
 # Load the E5 model for embeddings on CPU
 model_name = 'intfloat/e5-large-v2'
-device = 'cpu'  # Force using CPU
+device = 'cpu'
 model = SentenceTransformer(model_name, device=device)
 
 # Initialize FAISS index and chunks list
@@ -84,16 +84,31 @@ def query_faiss(question, top_k=3):
     return context, D[0]
 
 def get_answer(question, context, llm):
-    system = "Give your answers in 1-2 sentences."
-    prompt = f"System: {system}\nContext: {context}\nQuestion: {question}\nAnswer:"
+    system = (
+        "You are an assistant that retrieves answers directly from the provided context. "
+        "If the answer is explicitly stated in the context, provide it as is. "
+        "User may refer context as document"
+        "Keep answers concise, preferably in 2-3 sentences."
+    )
+    prompt = (
+        f"System: {system}\n"
+        f"Context: {context}\n"
+        f"Question: {question}\n"
+        f"Answer:"
+    )
     response = llm.invoke(prompt)
     return response.strip()
 
 def main():
+    # Initialize session state
+    if 'file_uploaded' not in st.session_state:
+        st.session_state.file_uploaded = False
+    
     # File uploader in Streamlit
     uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
     
-    if uploaded_file is not None:
+    # Check if a new file is uploaded
+    if uploaded_file is not None and not st.session_state.file_uploaded:
         with st.spinner("Processing PDF..."):
             # Save the uploaded file temporarily
             with open("temp.pdf", "wb") as f:
@@ -111,6 +126,11 @@ def main():
             # Upsert to FAISS
             upsert_to_faiss(chunks, embeddings)
             st.write("File embeddings saved!")
+        
+        # Mark the file as uploaded
+        st.session_state.file_uploaded = True
+        # Remove the temporary file
+        os.remove("temp.pdf")
     
     # Text area for questions
     questions_input = st.text_area("Enter your questions (one per line):")

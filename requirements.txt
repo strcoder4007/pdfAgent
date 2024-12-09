@@ -1,5 +1,6 @@
 fitz
 langchain
+langchain_openai
 streamlit
 faiss-cpu
 sentence-transformers

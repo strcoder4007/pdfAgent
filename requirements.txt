@@ -1,3 +1,4 @@
+fitz
 langchain
 streamlit
 pinecone[grpc]

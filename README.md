@@ -2,6 +2,8 @@
 
 A Streamlit application that allows users to upload a PDF document, create embeddings using Sentence Transformers, and answer questions based on the document's content using GPT-4.
 
+![Playing GIF](/images/zania.gif)
+
 ## Features
 
 - **PDF Upload**: Upload a PDF file for processing.

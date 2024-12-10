@@ -246,7 +246,7 @@ def main():
             for q in questions:
                 context, distances = query_faiss(q)
                 context_str = ' '.join(context)
-                confidence_threshold = 1.5
+                confidence_threshold = 0.45
                 if np.min(distances) > confidence_threshold:
                     answers[q] = "Data Not Available"
                 else:

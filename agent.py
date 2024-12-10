@@ -10,6 +10,8 @@ import fitz
 import numpy as np
 import json
 import tiktoken
+from sklearn.preprocessing import normalize
+import time
 
 # Load environment variables
 load_dotenv()
@@ -18,11 +20,8 @@ load_dotenv()
 llm = ChatOpenAI(
     model_name="gpt-4o-mini",
     openai_api_key=os.environ.get("OPENAI_API_KEY"),
-    temperature=0
+    temperature=0.2
 )
-
-
-
 
 # Load the E5 model for embeddings on CPU
 model_name = 'intfloat/e5-large-v2'
@@ -46,18 +45,9 @@ if index_exists and chunks_exists:
 # Streamlit app title
 st.title("PDF Question Answering")
 
-
-
-
 def extract_text_from_pdf(file_path):
     """
     Extracts text from a PDF file.
-
-    Parameters:
-        file_path (str): The path to the PDF file.
-
-    Returns:
-        str: The extracted text from the PDF.
     """
     doc = fitz.open(file_path)
     text = ""
@@ -65,20 +55,9 @@ def extract_text_from_pdf(file_path):
         text += doc.load_page(page_num).get_text()
     return text
 
-
-
-
-
 def chunk_text(text, max_length=500):
     """
     Splits the input text into chunks of a specified maximum length.
-
-    Parameters:
-        text (str): The input text to be chunked.
-        max_length (int, optional): The maximum length of each chunk. Defaults to 500.
-
-    Returns:
-        list of str: A list of text chunks.
     """
     words = text.split()
     chunks = []
@@ -93,38 +72,17 @@ def chunk_text(text, max_length=500):
         chunks.append(' '.join(current_chunk))
     return chunks
 
-
-
-
-
-
 def generate_embeddings(texts):
     """
-    Generates embeddings for a list of texts using a pre-loaded SentenceTransformer model.
-
-    Parameters:
-        texts (list of str): The list of texts to generate embeddings for.
-
-    Returns:
-        numpy.ndarray: A 2D array of embeddings.
+    Generates and normalizes embeddings for a list of texts.
     """
-    embeddings = model.encode(texts, convert_to_tensor=True)
-    return embeddings.numpy().astype(np.float32)
-
-
-
-
+    embeddings = model.encode(texts, convert_to_tensor=True).numpy().astype(np.float32)
+    embeddings = normalize(embeddings, norm='l2')
+    return embeddings
 
 def upsert_to_faiss(chunks, embeddings):
     """
-    Adds chunks and their corresponding embeddings to the FAISS index and saves them.
-
-    Parameters:
-        chunks (list of str): The text chunks to add.
-        embeddings (numpy.ndarray): The embeddings corresponding to the chunks.
-
-    Returns:
-        None
+    Adds normalized chunks and embeddings to the FAISS index.
     """
     global faiss_index, chunks_list
     if faiss_index.ntotal == 0:
@@ -135,67 +93,30 @@ def upsert_to_faiss(chunks, embeddings):
     with open('chunks.pkl', 'wb') as f:
         pickle.dump(chunks_list, f)
 
-
-
-
-
-
 def query_faiss(question, top_k=3):
     """
-    Queries the FAISS index to find the top_k most similar chunks to the input question.
-
-    Parameters:
-        question (str): The input question.
-        top_k (int, optional): The number of top chunks to retrieve. Defaults to 3.
-
-    Returns:
-        list of str: The retrieved context chunks.
-        numpy.ndarray: The distances of the retrieved chunks.
+    Queries the FAISS index for top_k similar chunks.
     """
     query_embedding = model.encode([question], convert_to_tensor=True).numpy().astype(np.float32)
+    query_embedding = normalize(query_embedding, norm='l2')
     D, I = faiss_index.search(query_embedding, top_k)
     context = [chunks_list[i] for i in I[0]]
     return context, D[0]
 
-
-
-
-
-
 def count_tokens(text):
     """
-    Counts the number of tokens in the input text using the tiktoken encoder.
-
-    Parameters:
-        text (str): The input text.
-
-    Returns:
-        int: The number of tokens in the text.
+    Counts the number of tokens in the input text.
     """
     encoder = tiktoken.get_encoding("cl100k_base")
     return len(encoder.encode(text))
 
-
-
-
-
-
 def get_answer(question, context, llm):
     """
-    Generates an answer to the question based on the provided context using a language model.
-
-    Parameters:
-        question (str): The input question.
-        context (str): The context to use for answering the question.
-        llm: The language model to use.
-
-    Returns:
-        str: The generated answer.
+    Generates an answer based on the provided context.
     """
     system = (
-        "You are an assistant that retrieves answers directly from the provided context. "
-        "If the answer is explicitly stated in the context, provide it as is. "
-        "Keep answers concise, preferably in 2-3 sentences."
+        "You are an assistant designed to answer questions based solely on the provided context. "
+        "If the answer is directly available in the context, provide it verbatim. Otherwise, summarize the relevant information concisely, ideally in 2-3 sentences."
     )
     context_str = ' '.join(context)
     if count_tokens(context_str) > 1200:
@@ -209,10 +130,6 @@ def get_answer(question, context, llm):
     response = llm.invoke(messages)
     return response.content.strip()
 
-
-
-
-
 def main():
     if 'file_uploaded' not in st.session_state:
         st.session_state.file_uploaded = False
@@ -220,14 +137,16 @@ def main():
     uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
     
     if uploaded_file is not None and not st.session_state.file_uploaded:
-        with st.spinner("Processing PDF...(Creating embedding on CPU might take 4-5 mins for long documents)"):
+        start_time = time.time()
+        with st.spinner("Processing PDF... (It might take 4-5 mins for long pdfs to process on CPU)"):
             with open("temp.pdf", "wb") as f:
                 f.write(uploaded_file.getbuffer())
             text = extract_text_from_pdf("temp.pdf")
             chunks = chunk_text(text)
             embeddings = generate_embeddings(chunks)
             upsert_to_faiss(chunks, embeddings)
-            st.write("File embeddings saved!")
+            elapsed_time = time.time() - start_time
+            st.write(f"File embeddings saved! Processing time: {elapsed_time:.1f} seconds")
         st.session_state.file_uploaded = True
         os.remove("temp.pdf")
     
@@ -253,13 +172,6 @@ def main():
                     answer = get_answer(q, context_str, llm)
                     answers[q] = answer
             st.json(answers)
-            json_str = json.dumps(answers, indent=4)
-            st.download_button(
-                label="Download Answers as JSON",
-                data=json_str,
-                file_name="answers.json",
-                mime="application/json"
-            )
 
 if __name__ == "__main__":
     main()

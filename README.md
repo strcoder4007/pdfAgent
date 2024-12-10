@@ -38,6 +38,10 @@ streamlit run app.py
 
 3. Access the app at `http://localhost:8501` in your web browser.
 
+
+## Note
+Once you upload the document, the embeddings are generated and stored so it doesn't need to compute it again.
+
 ## Usage
 
 - **Upload PDF**: Use the file uploader to upload your PDF document.
@@ -60,4 +64,4 @@ streamlit run app.py
 
 - Speed up embedding generation for large PDFs using parallel processing(GPU).
 
-- Add tools to agents depending on the use case and type of pdf/questions asked.
+- Add tools to agents depending on the use case and type of pdf/questions asked (eg: scraping links).
